@@ -23,7 +23,10 @@ import { getAdapter, listAdapters } from '../catalog';
  *   2. Live: skipped unless RUN_PROMETHEUS_LIVE=1. It needs PROMETHEUS_URL
  *      to point at a running Prometheus (its own server, a staging one, or a
  *      local `docker run prom/prometheus`); PROMETHEUS_AUTHORIZATION is
- *      optional and only for a server or proxy that asks for one.
+ *      optional and only for a server or proxy that asks for one. A server
+ *      that demands authentication is checked with
+ *      PROMETHEUS_LIVE_AUTH_REQUIRED=1: the call must be refused without the
+ *      header and answered with it.
  *
  *        RUN_PROMETHEUS_LIVE=1 npx jest src/adapters/intl/prometheus.live.spec.ts
  */
@@ -91,6 +94,9 @@ const call = (name: string, params: Record<string, unknown>, env = ENV) => {
       authType: a.connector.authType,
       authConfig: interpolateDeep(a.connector.authConfig ?? {}, env),
       headers: config.headers,
+      // The rules the connector stores with it: an error body Prometheus sends
+      // with 200 has to fail the call.
+      errorWhen: a.connector.config?.errorWhen,
     } as any,
     endpointMapping,
     { ...applySchemaDefaults(tool(name).parameters as any, params), ...env },
@@ -260,7 +266,14 @@ describe('prometheus adapter: static spec conformance', () => {
     expect(sent().headers.Authorization).toBe('Basic dXNlcjpwYXNz');
   });
 
-  it('turns an error body Prometheus sends with 200 into a failed call', () => {
+  it('turns an error body Prometheus sends with 200 into a failed call', async () => {
+    mockedAxios.mockResolvedValue({
+      data: { status: 'error', errorType: 'bad_data', error: 'invalid parameter "query"' },
+    });
+    await expect(call('prometheus_query', { query: 'up' })).rejects.toMatchObject({
+      status: 400,
+      message: expect.stringContaining('invalid parameter'),
+    });
     const rules = a.connector.config?.errorWhen;
     expect(rules).toBeDefined();
     expect(() => assertNoResponseBodyError({ status: 'success', data: {} }, rules)).not.toThrow();
@@ -455,5 +468,16 @@ live('prometheus adapter: live', () => {
   it('lists the alerting rules', async () => {
     const out = await shaped('prometheus_list_alert_rules', {}, env());
     expect(Array.isArray(out)).toBe(true);
+  }, 30000);
+
+  // Only for a server that asks for authentication: PROMETHEUS_URL points at
+  // one and PROMETHEUS_AUTHORIZATION carries the header it expects.
+  const authRequired = process.env.PROMETHEUS_LIVE_AUTH_REQUIRED === '1';
+  (authRequired ? it : it.skip)('is refused without the Authorization header and answers with it', async () => {
+    await expect(call('prometheus_get_build_info', {}, { PROMETHEUS_URL: url! })).rejects.toMatchObject({
+      response: { status: 401 },
+    });
+    const out = await shaped('prometheus_get_build_info', {}, env());
+    expect(typeof out.version).toBe('string');
   }, 30000);
 });
