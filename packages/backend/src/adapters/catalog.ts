@@ -370,6 +370,7 @@ import * as printful from './intl/printful.json';
 import * as printify from './intl/printify.json';
 import * as procore from './intl/procore.json';
 import * as promUa from './intl/prom-ua.json';
+import * as prometheus from './intl/prometheus.json';
 import * as proxmox from './intl/proxmox.json';
 import * as quaderno from './intl/quaderno.json';
 import * as quickbooksOnline from './intl/quickbooks-online.json';
@@ -1121,6 +1122,7 @@ const RAW_ADAPTERS: AdapterDefinition[] = [
   printify as unknown as AdapterDefinition,
   procore as unknown as AdapterDefinition,
   promUa as unknown as AdapterDefinition,
+  prometheus as unknown as AdapterDefinition,
   proxmox as unknown as AdapterDefinition,
   quaderno as unknown as AdapterDefinition,
   quickbooksOnline as unknown as AdapterDefinition,

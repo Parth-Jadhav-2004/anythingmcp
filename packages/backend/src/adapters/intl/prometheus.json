@@ -1,0 +1,519 @@
+{
+  "slug": "prometheus",
+  "name": "Prometheus",
+  "description": "Talk to a Prometheus server directly through its own HTTP API: run PromQL queries (instant and over a time range), list series, labels and label values, check the scrape targets and their health, read metric metadata and the alerting rules. This is the Prometheus server itself, not Grafana. Read-only.",
+  "instructions": "## Prometheus\nThis connector talks to a **Prometheus server directly**, through the server's own HTTP API (`<server>/api/v1/...`). It is not Grafana: when the metrics live in Grafana and you want to read them through a Grafana data source, that is the Grafana connector. Use this one when the Prometheus server is the thing to talk to.\n\nEverything here is read-only: instant and range queries, series and label discovery, scrape targets, metric metadata and the alerting rules. No rule can be written, no series deleted, no configuration changed.\n\n**Setup (about 1 minute)**\n1. Set `PROMETHEUS_URL` to the address of the Prometheus server, without `/api/v1` and without a trailing slash: `http://prometheus.example.com:9090` for a plain server, `https://prometheus.example.com` behind TLS, `https://example.com/prometheus` when it runs under a path. On AnythingMCP Cloud the server has to be reachable from the internet; a Prometheus on a private network is not reachable from there.\n2. Most Prometheus servers need no authentication. When yours does, set `PROMETHEUS_AUTHORIZATION` to the **complete value of the Authorization header**:\n   - basic auth (Prometheus started with `--web.config.file`): `Basic ` followed by the base64 of `user:password` (`printf 'user:password' | base64`).\n   - a proxy in front of Prometheus that wants a token: `Bearer <token>`.\n   Leave it empty when the server needs nothing.\n3. Check the setup with `prometheus_get_build_info`. It reports the version and works without a query.\n\n**How to work**\n1. See what exists first: `prometheus_label_names` for the label names, `prometheus_label_values` for the values of one label, `prometheus_series` for the series a selector matches, `prometheus_list_metric_metadata` for the type, help text and unit of a metric.\n2. Query with `prometheus_query` (the value right now) or `prometheus_query_range` (the values over a window). A PromQL expression is what goes in `query`, for example `sum by (job) (rate(http_requests_total[5m]))`, `up{job=\"api\"}` or `histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))`. An instant query evaluates the expression at one moment, so the time window belongs in the expression itself (`[5m]`, `[1h]`).\n3. Times: Prometheus takes **absolute timestamps only**, RFC3339 (`2026-10-21T12:00:00Z`) or Unix seconds (`1760486400`). `now-1h` is not accepted. `prometheus_query_range` therefore needs `start` and `end`. To learn the server's clock, run `prometheus_query` with the expression `time()`. For a question about the last hour it is often simpler to stay with an instant query and put the hour in the expression: `sum(rate(http_requests_total[1h]))`.\n4. State of the world: `prometheus_list_targets` for the scrape targets and their health (with the last error), `prometheus_list_alert_rules` for the rules and `prometheus_list_active_alerts` for the alerts that are firing right now.\n\n**Keep the answers small.** A range query returns one point per series per step, so the payload grows with (end - start) / step. The step defaults to 60s; keep the window short (minutes to a few hours), aggregate in the expression (`sum`, `topk`, `rate`) and match on labels (`job=\"api\"`) instead of asking for every series. Answers over about 60 KB are cut and say so; narrow the query rather than repeating it.\n\n**Times come back as Unix seconds** and values as strings, the way Prometheus returns them (`\"1\"`, `\"0.5\"`, `\"1.5e+09\"`). A value of `\"NaN\"` means the expression had no data for that series in that step. `prometheus_query` returns one entry per series: the labels of the series, its value and the time it was evaluated. A query that returns a single number comes back as one entry with a value and a time and no labels.\n\n**Common errors**\n- 400 `bad_data`: Prometheus rejected the request; the message says why (an unparsable timestamp, a missing `query`, a `step` that is not a duration).\n- 422: the PromQL expression could not be parsed; the message names the error. Check the expression with `prometheus_format_query`.\n- 401 or 403: the server or the proxy in front of it refused the request. `PROMETHEUS_AUTHORIZATION` is either missing or does not carry the value the server expects.\n- 404: nothing answered at this address. Check `PROMETHEUS_URL`: the address of the server, without `/api/v1` and without a trailing slash.\n- 503 from `prometheus_list_active_alerts`: the server was started without `--web.enable-lifecycle`, so the API that lists the firing alerts is switched off. The alerting rules are still readable with `prometheus_list_alert_rules`.\n- The request times out: the query is too expensive. Aggregate in the expression, shorten the window or raise the step.\n\n**Out of scope here**: writing or changing rules, silencing alerts, deleting series, the remote write and remote read APIs, the admin and status pages beyond the version, TSDB housekeeping, and Prometheus itself as a long-term store (that is what a Thanos or Mimir sidecar is for).",
+  "region": "intl",
+  "category": "monitoring",
+  "icon": "prometheus",
+  "docsUrl": "https://prometheus.io/docs/prometheus/latest/querying/api/",
+  "prerequisites": "A running Prometheus server (2.x) whose HTTP API is reachable from AnythingMCP, and its address. About a minute; no account needed on most servers.",
+  "requiredEnvVars": [
+    "PROMETHEUS_URL"
+  ],
+  "optionalEnvVars": [
+    "PROMETHEUS_AUTHORIZATION"
+  ],
+  "envVarMeta": {
+    "PROMETHEUS_URL": {
+      "label": "Prometheus URL",
+      "kind": "address",
+      "help": "The address of the Prometheus server itself, without /api/v1 and without a trailing slash: http://prometheus.example.com:9090 for a plain server, https://prometheus.example.com behind TLS, https://example.com/prometheus when it runs under a path.",
+      "example": "http://prometheus.example.com:9090",
+      "pattern": "^(?!.*\\/api\\/v1\\/?$)(https?://[^\\s/]+(/[^\\s]*[^\\s/])?)$",
+      "patternMessage": "Enter the full address starting with http:// or https://, without /api/v1 and without a trailing slash, e.g. http://prometheus.example.com:9090."
+    },
+    "PROMETHEUS_AUTHORIZATION": {
+      "label": "Authorization header",
+      "kind": "credential",
+      "secret": true,
+      "help": "Only when the server, or a proxy in front of it, needs authentication: the complete value of the Authorization header. Basic auth: 'Basic ' plus the base64 of user:password (printf 'user:password' | base64). A proxy with a token: 'Bearer <token>'. Leave empty when Prometheus needs no authentication.",
+      "example": "Basic dXNlcjpwYXNzd29yZA==",
+      "advanced": true
+    }
+  },
+  "verifyHints": {
+    "400": "Prometheus rejected the request. The message says what was wrong: an unparsable timestamp, a missing query, or a step that is not a duration.",
+    "401": "The server or the proxy in front of it refused the credentials. Set PROMETHEUS_AUTHORIZATION to the complete Authorization header value, for example 'Basic <base64 of user:password>' or 'Bearer <token>'.",
+    "403": "The server accepted the request but does not allow it. A proxy in front of Prometheus may have its own rules; check them.",
+    "404": "Nothing answered at this address. Check PROMETHEUS_URL: the address of the Prometheus server, without /api/v1 and without a trailing slash.",
+    "422": "Prometheus could not run the expression: the PromQL is invalid. The message names the parse error.",
+    "503": "The server is not ready, is reloading, or the lifecycle API is switched off. That is what prometheus_list_active_alerts needs; the rules are still readable with prometheus_list_alert_rules.",
+    "timeout": "The query took too long. Aggregate in the expression, shorten the window or raise the step."
+  },
+  "probe": {
+    "tool": "prometheus_get_build_info"
+  },
+  "connector": {
+    "name": "Prometheus HTTP API",
+    "type": "REST",
+    "baseUrl": "{{PROMETHEUS_URL}}",
+    "authType": "NONE",
+    "headers": {
+      "Accept": "application/json",
+      "User-Agent": "AnythingMCP"
+    },
+    "healthcheckPath": "/api/v1/status/buildinfo",
+    "config": {
+      "errorWhen": [
+        {
+          "path": "status",
+          "equals": "error",
+          "messagePath": "error",
+          "status": 400
+        }
+      ]
+    }
+  },
+  "tools": [
+    {
+      "name": "prometheus_query",
+      "description": "Run a PromQL query against this Prometheus server and get the value of every matching series right now. Use it for questions like 'how many errors in the last 5 minutes' (query: sum(rate(http_requests_total{status=\"500\"}[5m])), for the value of one metric (query: up{job=\"api\"}) or for a single number (query: count(up == 0)). The time window belongs in the expression itself, as in [5m]. One entry comes back per series, with its labels, its value and the time it was evaluated; a query that returns a single number comes back as one entry with a value and a time and no labels. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "PromQL expression to evaluate, for example sum by (job) (rate(http_requests_total[5m])), up{job=\"api\"} or count(up == 0). An instant query evaluates it at one moment in time."
+          },
+          "time": {
+            "type": "string",
+            "description": "Evaluation time as RFC3339 (2026-10-21T12:00:00Z) or Unix seconds (1760486400). Prometheus takes absolute timestamps only. Leave empty for now."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/query",
+        "queryParams": {
+          "query": "$query",
+          "time": "$time"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data.resultType == 'vector' ? data.result[].{labels: metric, value: value[1], timestamp: value[0]} : [{value: data.result[1], timestamp: data.result[0]}]",
+          "maxBytes": 40000
+        }
+      }
+    },
+    {
+      "name": "prometheus_query_range",
+      "description": "Run a PromQL query over a time window and get the values over time, one list of points per series. Use it for 'how did the error rate develop over the last hour'. Prometheus needs absolute timestamps: pass start and end as RFC3339 (2026-10-21T12:00:00Z) or Unix seconds (1760486400), never as now-1h. Keep the window short and aggregate in the expression, otherwise the answer is cut. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "PromQL expression evaluated at every step, for example sum by (job) (rate(http_requests_total[5m]))."
+          },
+          "start": {
+            "type": "string",
+            "description": "Start of the window as RFC3339 (2026-10-21T11:00:00Z) or Unix seconds (1760482800). Prometheus takes absolute timestamps only."
+          },
+          "end": {
+            "type": "string",
+            "description": "End of the window as RFC3339 or Unix seconds (1760486400). prometheus_query with the expression time() returns the server's clock."
+          },
+          "step": {
+            "type": "string",
+            "default": "60s",
+            "description": "Distance between the evaluated points, a Prometheus duration such as 60s, 5m or 1h. Default 60s. The answer grows with (end - start) / step, so raise the step for a longer window."
+          }
+        },
+        "required": [
+          "query",
+          "start",
+          "end"
+        ]
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/query_range",
+        "queryParams": {
+          "query": "$query",
+          "start": "$start",
+          "end": "$end",
+          "step": "$step"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data.result[].{labels: metric, points: values}",
+          "maxBytes": 60000
+        }
+      }
+    },
+    {
+      "name": "prometheus_format_query",
+      "description": "Parse a PromQL expression and return it in its canonical form, without running it. Use it to check that an expression is valid and to see how Prometheus reads it, before spending a query on it. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "PromQL expression to parse, for example sum by (job) (rate(http_requests_total[5m]))."
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/format_query",
+        "queryParams": {
+          "query": "$query"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "select",
+          "select": {
+            "query": "$.data"
+          },
+          "maxBytes": 5000
+        }
+      }
+    },
+    {
+      "name": "prometheus_series",
+      "description": "List the time series that match a selector, with their labels, for example {__name__=\"up\", job=\"api\", instance=\"api-1:8080\"}. Use it to find which label values exist before writing a query, or which series a metric has. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "match": {
+            "type": "string",
+            "description": "Series selector, for example up, job=\"api\" or {__name__=~\"http_requests_total\", job=\"api\"}. Several selectors can be given, separated by commas."
+          },
+          "start": {
+            "type": "string",
+            "description": "Only series that had samples after this time, as RFC3339 (2026-10-21T11:00:00Z) or Unix seconds (1760482800). Prometheus keeps the series in its database either way."
+          },
+          "end": {
+            "type": "string",
+            "description": "Only series that had samples before this time, as RFC3339 or Unix seconds (1760486400)."
+          }
+        },
+        "required": [
+          "match"
+        ]
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/series",
+        "queryParams": {
+          "match[]": "$match",
+          "start": "$start",
+          "end": "$end"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data",
+          "maxBytes": 40000
+        }
+      }
+    },
+    {
+      "name": "prometheus_label_names",
+      "description": "List the label names in this Prometheus server, such as job, instance or namespace. Use it to find out how the metrics are labelled before writing a selector. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "match": {
+            "type": "string",
+            "description": "Only the labels of series matching this selector, for example {__name__=~\"http_.*\"}. Leave empty for every label name."
+          },
+          "start": {
+            "type": "string",
+            "description": "Only series that had samples after this time, as RFC3339 or Unix seconds (1760482800)."
+          },
+          "end": {
+            "type": "string",
+            "description": "Only series that had samples before this time, as RFC3339 or Unix seconds (1760486400)."
+          }
+        }
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/labels",
+        "queryParams": {
+          "match[]": "$match",
+          "start": "$start",
+          "end": "$end"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data",
+          "maxBytes": 20000
+        }
+      }
+    },
+    {
+      "name": "prometheus_label_values",
+      "description": "List the values one label takes in this Prometheus server, for example the jobs behind the label job. Use it to find the exact values a selector can match. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "label": {
+            "type": "string",
+            "description": "Name of the label, for example job, instance or namespace."
+          },
+          "match": {
+            "type": "string",
+            "description": "Only the values of series matching this selector, for example {__name__=\"up\"}. Leave empty for every value."
+          },
+          "start": {
+            "type": "string",
+            "description": "Only series that had samples after this time, as RFC3339 or Unix seconds (1760482800)."
+          },
+          "end": {
+            "type": "string",
+            "description": "Only series that had samples before this time, as RFC3339 or Unix seconds (1760486400)."
+          }
+        },
+        "required": [
+          "label"
+        ]
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/label/{label}/values",
+        "queryParams": {
+          "match[]": "$match",
+          "start": "$start",
+          "end": "$end"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data",
+          "maxBytes": 20000
+        }
+      }
+    },
+    {
+      "name": "prometheus_list_targets",
+      "description": "List the scrape targets of this Prometheus server with their health: the labels, the scrape URL, the last scrape, the last error and the scrape interval. Use it to see what is being scraped and what is failing. The dropped targets are the ones Prometheus threw away while relabelling. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "state": {
+            "type": "string",
+            "enum": [
+              "active",
+              "dropped",
+              "any"
+            ],
+            "default": "active",
+            "description": "Which targets to list: active (the ones being scraped, default), dropped (the ones Prometheus threw away) or any (both)."
+          }
+        }
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/targets",
+        "queryParams": {
+          "state": "$state"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "select",
+          "select": {
+            "active": {
+              "$from": "$.data.activeTargets[*]",
+              "$select": {
+                "labels": "labels",
+                "health": "health",
+                "lastError": "lastError",
+                "lastScrape": "lastScrape",
+                "lastScrapeDuration": "lastScrapeDuration",
+                "scrapeInterval": "scrapeInterval",
+                "scrapeUrl": "scrapeUrl",
+                "scrapePool": "scrapePool"
+              }
+            },
+            "dropped": {
+              "$from": "$.data.droppedTargets[*]",
+              "$select": {
+                "labels": "labels",
+                "discoveredLabels": "discoveredLabels"
+              }
+            }
+          },
+          "maxBytes": 40000
+        }
+      }
+    },
+    {
+      "name": "prometheus_list_metric_metadata",
+      "description": "Read the metadata Prometheus keeps for a metric: its type (counter, gauge, histogram, summary), the help text and the unit. Use it to learn what a metric means before querying it. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "metric": {
+            "type": "string",
+            "description": "Name of the metric, for example http_requests_total. Leave empty for the metadata of every metric."
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 50,
+            "description": "Most metrics to return when no metric name is given (default 50)."
+          }
+        }
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/metadata",
+        "queryParams": {
+          "metric": "$metric",
+          "limit": "$limit"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data",
+          "maxBytes": 40000
+        }
+      }
+    },
+    {
+      "name": "prometheus_list_alert_rules",
+      "description": "List the alerting and recording rules of this Prometheus server with their groups: the rule name, the PromQL it evaluates, the labels and annotations, its health and its state. Use it to see what is supposed to fire and how a rule is written. The alerts of a rule (its firing instances) are left out by default; set exclude_alerts to false to include them. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "alert",
+              "record"
+            ],
+            "description": "Only alerting rules (alert) or only recording rules (record). Leave empty for both."
+          },
+          "rule_name": {
+            "type": "string",
+            "description": "Only the rule with this name, for example HighErrorRate. Several names can be given, separated by commas."
+          },
+          "rule_group": {
+            "type": "string",
+            "description": "Only the rules of this group, for example api.rules. Several groups can be given, separated by commas."
+          },
+          "exclude_alerts": {
+            "type": "boolean",
+            "default": true,
+            "description": "Leave out the alerts of each rule (default true). Set to false to see the firing instances of every rule."
+          }
+        }
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/rules",
+        "queryParams": {
+          "type": "$type",
+          "rule_name[]": "$rule_name",
+          "rule_group[]": "$rule_group",
+          "exclude_alerts": "$exclude_alerts"
+        },
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data.groups[].{name: name, file: file, interval: interval, rules: rules[].{name: name, type: type, state: state, health: health, query: query, duration: duration, labels: labels, annotations: annotations, alerts: alerts[]}}",
+          "maxBytes": 50000
+        }
+      }
+    },
+    {
+      "name": "prometheus_list_active_alerts",
+      "description": "List the alerts this Prometheus server is holding right now: the alert name and its labels, the annotations, the state (pending, firing or inactive) and the value that triggered it. Use it to see what is alerting at this moment. The server needs to be started with --web.enable-lifecycle, otherwise Prometheus answers 503. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/alerts",
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "jmespath",
+          "expression": "data.alerts[].{labels: labels, annotations: annotations, state: state, activeAt: activeAt, value: value}",
+          "maxBytes": 40000
+        }
+      }
+    },
+    {
+      "name": "prometheus_get_build_info",
+      "description": "Read the version and build information of this Prometheus server: version, revision, branch, build date and the Go version it was built with. A quick check that the address is right; it needs no query and no authentication on most servers. Read-only.",
+      "parameters": {
+        "type": "object",
+        "properties": {}
+      },
+      "endpointMapping": {
+        "method": "GET",
+        "path": "/api/v1/status/buildinfo",
+        "headers": {
+          "Authorization": "${PROMETHEUS_AUTHORIZATION}"
+        }
+      },
+      "responseMapping": {
+        "transform": {
+          "mode": "select",
+          "select": {
+            "version": "$.data.version",
+            "revision": "$.data.revision",
+            "branch": "$.data.branch",
+            "buildUser": "$.data.buildUser",
+            "buildDate": "$.data.buildDate",
+            "goVersion": "$.data.goVersion"
+          },
+          "maxBytes": 5000
+        }
+      }
+    }
+  ]
+}
